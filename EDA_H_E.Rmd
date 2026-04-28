@@ -1,0 +1,322 @@
+---
+title: "EDA"
+author: "Zach Goldstein"
+date: "2025-05-21"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(12345)
+```
+
+```{r package-setup, include = FALSE}
+#Installing Packages
+library(tidyverse)
+library(openxlsx)
+library(ggplot2)
+library(janitor)
+library(dplyr)
+library(scales)
+```
+
+```{r}
+#loading data
+data <- read.xlsx("Ropivacaine_Dexmed_Data_AH.xlsx", sheet = "Summarized")
+
+#clean column names
+data <- janitor::clean_names(data)
+
+#view structure
+glimpse(data)
+
+```
+
+## Summary
+
+```{r summary, message=FALSE, warning=FALSE}
+summary(data)
+```
+
+## Some plots
+
+```{r, message=FALSE, warning=FALSE}
+#spaghetti plot
+
+spaghetti_horse <- ggplot(data, aes(x = treatment, y = total_anesthesia_time_min, group = horse, color = factor(horse))) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Total Anesthesia Time by Treatment",
+    subtitle = "Lines grouped by horse",
+    x = "Treatment",
+    y = "Total Anesthesia Time (min)",
+    color = "Horse ID"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+print(spaghetti_horse)
+ggsave("spaghetti_plot_horse.png")
+```
+This plot clusters treatments (x-axis) and draws 11 lines (y-axis = minutes of anesthesia) colored by Horse ID. It highlights both within and between horse differences. Look for consistency (some horses always higher under DR) or variability (some horses respond better to R).  
+
+```{r, message=FALSE, warning=FALSE}
+#bar plots
+
+barplot_horse <- ggplot(data, aes(x = factor(horse), y = total_anesthesia_time_min, fill = treatment)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  labs(
+    title = "Total Anesthesia Time per Horse",
+    subtitle = "Grouped by Horse, Colored by Treatment",
+    x = "Horse ID",
+    y = "Total Anesthesia Time (min)",
+    fill = "Treatment"
+  ) +
+  theme_minimal()
+
+print(barplot_horse)
+ggsave("barplot_horse.png")
+```
+This plot clusters each horse (x-axis) and draws three side-by-side bars (y-axis = minutes of anesthesia) colored by treatment. It highlights within‐horse differences. Look for consistency (some horses always higher under DR) or variability (some horses respond better to R).
+
+```{r, message=FALSE, warning=FALSE}
+#box plots
+
+boxplot_horse <- ggplot(data, aes(x = treatment, y = duration_of_min_ctt_min, fill = treatment)) +
+  geom_boxplot(width = 0.6, outlier.shape = 21, outlier.fill = "white") +
+  labs(
+    title = "Duration at Minimum CTT by Treatment",
+    x = "Treatment",
+    y = "Duration of Min CTT (min)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(boxplot_horse)
+ggsave("boxplot_horse.png")
+```
+Each box spans the interquartile range of “Duration of Min CTT (min)” for R, DR, and S; the median line shows the typical duration, and whiskers/outliers show spread. Longer median and tighter IQR for DR would indicate not only a deeper block but also more consistent performance across horses.
+
+
+```{r, message=FALSE, warning=FALSE}
+#density distribution plots
+
+dens_distr_plot_horse <- ggplot(data, aes(x = maximum_corneal_pressure, color = treatment, fill = treatment)) +
+  geom_density(alpha = 0.3) +
+  labs(
+    title = "Density of Maximum Corneal Pressure",
+    x = "Max Corneal Pressure (mmHg or g/mm²)",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+print(dens_distr_plot_horse)
+ggsave("dens_distr_plot_horse.png")
+```
+These overlaid kernels show where maximum pressure values concentrate. Peaks shifted to the right mean higher pressures (deeper stimulus) are common. If the DR curve peaks right of R, that suggests dexmedetomidine addition yields a stronger corneal block.
+
+```{r, message=FALSE, warning=FALSE}
+#max pressure scatter
+
+max_press_scatter_horse <- ggplot(data, aes(x = maximum_corneal_pressure, y = total_anesthesia_time_min, color = treatment)) +
+  geom_point(size = 2, alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "TTA vs. Maximum Corneal Pressure",
+    x = "Max Corneal Pressure",
+    y = "Total Anesthesia Time (min)"
+  ) +
+  theme_minimal()
+
+print(max_press_scatter_horse)
+ggsave("max_press_scatter_horse.png")
+```
+Each point is one horse‐period; color denotes R/DR/S. The regression line per group tests whether deeper block (higher pressure) predicts longer anesthesia. A steeper positive slope for DR means horses that hit a higher pressure under DR tended to stay anesthetized longer.
+
+```{r, message=FALSE, warning=FALSE}
+min_press_scatter_horse <- ggplot(data, aes(x = minimum_ctt_cm, y = total_anesthesia_time_min, color = treatment)) +
+  geom_jitter(width = 0.1, height = 0.1, size = 2) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Total Anesthesia Time vs. Minimum CTT",
+    x = "Minimum CTT (cm)",
+    y = "Total Anesthesia Time (min)"
+  ) +
+  theme_minimal()
+
+print(min_press_scatter_horse)
+ggsave("min_press_scatter_horse.png")
+```
+Since lower CTT (smaller filament) = deeper block, this plot asks “do deeper blocks last longer?” Jitter avoids overplotting, and trend lines show overall association. A downward‐sloping line would confirm that smaller CTTs correspond to longer anesthesia.
+
+```{r, message=FALSE, warning=FALSE}
+#crossover effect plot
+crossover_box_plot <- ggplot(data, aes(x = factor(period), y = total_anesthesia_time_min, fill = treatment)) +
+  geom_boxplot(position = position_dodge(width = 0.8)) +
+  labs(
+    title = "TTA by Period and Treatment",
+    x = "Period",
+    y = "Total Anesthesia Time (min)",
+    fill = "Treatment"
+  ) +
+  theme_minimal()
+
+print(crossover_box_plot)
+ggsave("crossover_box_plot.png")
+```
+This checks for carry-over or period effects. If DR in period 1 has a very different distribution than DR in period 2, it hints at a period bias (e.g., lingering drug). Parallel, overlapping boxes across periods suggest minimal carry-over.
+
+
+```{r, fig.height=7.5, message=FALSE, warning=FALSE}
+library(GGally)
+
+pairwise_plot <- ggpairs(
+  data,
+  columns = c(
+    "minimum_ctt_cm",
+    "duration_of_min_ctt_min",
+    "maximum_corneal_pressure",
+    "total_anesthesia_time_min"
+  ),
+  columnLabels = c(
+    "Min CTT (cm)",
+    "Duration at Min CTT (min)",
+    "Max Corneal Pressure",
+    "Total Anesthesia Time (min)"
+  ),
+  mapping = aes(color = treatment, alpha = 0.5),
+  upper = list(continuous = wrap("cor", size = 3)),
+  lower = list(continuous = wrap("points", size = 1)),
+  diag  = list(continuous = wrap("densityDiag", alpha = 0.3))
+)  +
+  theme_minimal() +
+  labs(
+    title   = "Pairwise Relationships of Key Metrics by Treatment",
+    caption = "Scatter, density, and correlation panels"
+  )
+
+
+print(pairwise_plot)
+ggsave("pairwise_plot.png", width = 8, height = 7.5)
+```
+Diagonal panels show each variable’s distribution; upper triangle shows numeric correlations, and lower› triangle shows scatter points colored by treatment. This comprehensive view helps spot clusters (e.g., DR points clustering in one corner) and inter‐variable patterns (strong correlation between pressure and duration).
+
+
+## Loading in Hemorrhage Score Data
+
+```{r, message=FALSE, warning=FALSE}
+#read the hemorrhage‐score sheet
+hemscore <- read.xlsx("Ropivacaine_Dexmed_Data_AH.xlsx", sheet = "HemScore") %>%
+  clean_names()
+
+#peek at its structure
+glimpse(hemscore)
+head(hemscore)
+```
+```{r, message=FALSE, warning=FALSE}
+#join hem scores to existing data
+data_hem <- data %>%
+  left_join(hemscore, by = c("horse", "treatment"))
+
+#checking for missing hem scores (SHOULD WE DROP NA VALUES???)
+data_hem %>%
+  summarize(n_total = n(),
+            n_missing = sum(is.na(hemorrhage_score)))
+```
+
+Assuming NA scores mean no hemorrhage reported, we will consider them as zeros
+```{r}
+#impute all NAs in hemorrhage_score to 0
+data_hem_zero <- data_hem %>%
+  mutate(hemorrhage_score = replace_na(hemorrhage_score, 0))
+
+#quick check
+glimpse(data_hem_zero)
+
+```
+```{r, message=FALSE, warning=FALSE}
+#plotting hem scores (INCLUDE IN FINAL REPORT)
+
+hem_score_barplot <- ggplot(data_hem_zero, aes(x = treatment, fill = factor(hemorrhage_score))) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer("Hem Score", palette = "Reds") +
+  labs(
+    x = "Treatment",
+    y = "Proportion of Eyes",
+    title = "Distribution of Hemorrhage Scores by Treatment"
+  ) +
+  theme_minimal()
+
+print(hem_score_barplot)
+ggsave("hem_score_barplot.png")
+```
+This plot shows 
+```{r, message=FALSE, warning=FALSE}
+#heatmap to visualize score vs TTA
+
+hem_heatmap <- ggplot(data_hem_zero, aes(
+    x = factor(hemorrhage_score), 
+    y = cut_width(total_anesthesia_time_min, width = 30))
+  ) +
+  geom_count(aes(color = treatment), alpha = 0.7) +
+  labs(
+    x = "Hemorrhage Score",
+    y = "TTA (30-min bins)",
+    title = "Count of (Score, TTA-bin) by Treatment"
+  ) +
+  theme_minimal()
+
+print(hem_heatmap)
+ggsave("hem_heatmap.png")
+```
+```{r, message=FALSE, warning=FALSE}
+#spaghetti plot but with hem scores added 
+
+spaghetti_hem <- ggplot(data_hem_zero, aes(
+    x     = treatment,
+    y     = total_anesthesia_time_min,
+    group = factor(horse),
+    color = factor(horse)
+  )) +
+  # thinner, semi-transparent lines behind
+  geom_line(size = 0.8, alpha = 0.6) +
+  # jittered points sized by hem score
+  geom_point(aes(size = hemorrhage_score),
+             position = position_jitter(width = 0.09, height = 0),
+             shape    = 21,
+             stroke   = 0.6,
+             fill     = "white",
+             alpha    = 0.9) +
+  scale_size_continuous(
+    range  = c(3, 10),    # 0→3 maps from 3px to 12px
+    breaks = 0:3,
+    labels = 0:3
+  ) +
+  labs(
+    title = "Total Anesthesia Time by Treatment with Hemorrhage Scores",
+    x     = "Treatment",
+    y     = "Total Anesthesia Time (min)",
+    color = "Horse ID",
+    size  = "Hem Score"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position  = "right",
+    axis.title.y     = element_text(margin = margin(r = 10)),
+    panel.grid.major = element_line(color = "grey90")
+  )
+
+print(spaghetti_hem)
+ggsave("spaghetti_hem.png")
+```
+This plot clusters treatments (x-axis) and draws 11 lines (y-axis = minutes of anesthesia) colored by Horse ID. It highlights both within and between horse differences. Look for consistency (some horses always higher under DR) or variability (some horses respond better to R). Additionally, the size of each point correlates to its specific hemorrhage score. 
+
+```{r, message=FALSE, warning=FALSE}
+save(data_hem_zero, file = "data_hem_zero.rda")
+
+save(data_hem, file = "data_hem.rda")
+
+save(data, file = "data_horses_sum.rda")
+```

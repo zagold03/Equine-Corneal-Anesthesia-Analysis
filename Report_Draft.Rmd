@@ -1,0 +1,1183 @@
+---
+title: "Equine Corneal Study Report"
+author: 
+   - Zach Goldstein^[CSU College of Natural Sciences]
+   - Dr. Ann Hess^[Statistics]
+   - Dr. Rachel Hector^[CSU Vet Hospital]
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+# Load libraries
+library(knitr)
+library(tidyverse)
+library(openxlsx)
+library(ggplot2)
+library(janitor)
+library(dplyr)
+library(scales)
+library(lme4)
+library(lmerTest) 
+library(emmeans)
+library(kableExtra)
+library(broom.mixed)
+library(broom)
+```
+
+```{r data-frame-setup, include = FALSE}
+#making original data frame (without horse_period)
+df_summ <- read.xlsx("Ropivacaine_Dexmed_Data_AH.xlsx", sheet = "Summarized") %>%
+  rename(
+    horse                     = Horse,
+    treatment                 = Treatment,
+    period                    = Period,
+    minimum_ctt_cm            = `Minimum.CTT.(cm)`,
+    duration_of_min_ctt_min   = `Duration.of.Min.CTT.(min)`,
+    maximum_corneal_pressure  = Maximum.corneal.pressure,
+    total_anesthesia_time_min = `Total.Anesthesia.Time.(min)`
+  ) %>%
+  mutate(
+    horse     = factor(horse),
+    treatment = factor(treatment, levels = c("DR", "R", "S")),
+    period    = factor(period)
+  )
+
+#adding horse_period
+df_summ2 <- df_summ %>%
+  mutate(
+    horse_period = interaction(horse, period, sep = "_")
+  )
+
+#adding HemScore
+#load the hemorrhage‐score sheet, keeping only horse, treatment, and score
+df_hem_raw <- read.xlsx("Ropivacaine_Dexmed_Data_AH.xlsx", sheet = "HemScore") %>%
+  clean_names() 
+#align types and fill missing
+df_hem <- df_hem_raw %>%
+  mutate(
+    horse     = factor(horse, levels = levels(df_summ2$horse)),
+    treatment = factor(treatment, levels = levels(df_summ2$treatment)),
+    hem_score = replace_na(hemorrhage_score, 0)
+  ) %>%
+  select(horse, treatment, hem_score)
+
+#join hem_score onto summarized data
+df_summ3 <- df_summ2 %>%
+  left_join(df_hem, by = c("horse", "treatment")) %>%
+  mutate(
+    hem_score = replace_na(hem_score, 0)
+  )
+
+#loading in the full dataset
+#read in full sheet from xlsx file
+df_full <- read.xlsx("Ropivacaine_Dexmed_Data_AH.xlsx", sheet = "Full") %>%
+  #drop any completely empty rows
+  filter(!is.na(Variable))
+
+#choosing horse (THIS ALLOWS FOR VERY EASY MANIPULATION AND VIEWING FOR HORSES AND TREATMENTS)
+sel_horse <- "4"
+sel_trt   <- "DR"
+
+```
+
+
+# 1 Introduction
+
+Effective corneal anesthesia in horses is critical for standing ophthalmic procedures -- such as tonometry, debridement, and minor intraocular surgery -- where general anesthesia carries approximately a 1% mortality risk. In this two‐period crossover study, ten adult horses (excluding one with pre‐existing cataracts) each received dexmedetomidine + ropivacaine (DR), ropivacaine alone (R), and saline placebo (S) in a fully randomized sequence so that every eye served as both active treatment and control across sessions.  In each period, one eye was randomly assigned to the active drug (DR or R) and the contralateral eye to saline, with the specific pairing (DR vs S or R vs S) determined by a randomization list; a one‐week washout separated periods to eliminate carryover effects.
+  
+
+Under light xylazine sedation, a 27-gauge needle delivered a small subconjunctival bleb of anesthetic into the soft tissues overlying the cornea, targeting the sensory nerve plexus. Baseline corneal touch threshold (CTT) was measured with a Cochet–Bonnet esthesiometer: a very fine, retractable nylon filament that is gently touched to the center of the cornea. The longer the filament, the less force it applies; the shorter it is, the more pressure it puts on the eye. If the horse blinks, the filament length is recorded in centimeters as the CTT. A CTT of 6 cm (maximum length) means the cornea is fully sensitive; a CTT of 0 cm (shortest length) means the horse felt nothing at any pressure: the cornea is maximally numb. Corneal pressure was recorded via calibrated tonometry. Following drug instillation, CTT and pressure were assessed every 10 minutes for up to 2 hours -- then at 30-minute intervals if anesthesia persisted—until the CTT filament returned to its baseline length on two consecutive readings. We defined **Total Anesthesia Time (TTA)** as the minutes elapsed to that recovery point. Hemorrhage at the injection site was scored on a 0–4 scale by blinded observers, and ambient humidity (%) was logged at each time point to account for its known effect on esthesiometer filament stiffness.
+  
+
+## 1.1 Exploratory Data Analysis
+```{r eda}
+#spaghetti plot
+spaghetti_horse <- ggplot(df_summ3, aes(x = treatment, y = total_anesthesia_time_min, group = horse, color = factor(horse))) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Total Anesthesia Time by Treatment",
+    subtitle = "Lines grouped by horse",
+    x = "Treatment",
+    y = "Total Anesthesia Time (min)",
+    color = "Horse ID"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+print(spaghetti_horse)
+
+#hemscore distribution plot
+hem_score_barplot <- ggplot(df_summ3, aes(x = treatment, fill = factor(hem_score))) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer("Hem Score", palette = "Reds") +
+  labs(
+    x = "Treatment",
+    y = "Proportion of Eyes",
+    title = "Distribution of Hemorrhage Scores by Treatment"
+  ) +
+  theme_minimal()
+
+print(hem_score_barplot)
+```
+Our **exploratory data analysis** centered on two key visualizations. The “Total Anesthesia Time by Treatment” spaghetti-plot overlays each horse’s TTA trajectory across DR, R, and S, highlighting substantial variability under DR—two horses exceeded 400 minutes while most remained between 100 and 200. The “Distribution of Hemorrhage Scores by Treatment” stacked-bar chart shows that DR sessions not only produced longer anesthesia but also a greater frequency of moderate to severe bleeding, as compared to the ropivicaine and saline treatments. Additional exploratory graphics (not shown) -- including scatterplots of CTT recovery slopes and histograms of corneal pressure -- confirmed right-skewed distributions and suggested the need for variance-stabilizing transformations, robust random-effects, and complementary nonparametric testing.
+
+# 2 Analysis Description
+
+All data processing and statistical modeling were conducted in R within an R Markdown framework to ensure reproducibility. The Excel source contained three sheets:
+
+- **Summarized** (`df_summ`): per-eye summary metrics -- minimum CTT ($cm$), duration of minimum CTT ($min$), maximum corneal pressure ($g/mm^2$), and TTA ($min$).  
+- **HemScore** (`df_hem_raw` -> `df_summ4`): raw hemorrhage scores, cleaned, aligned, and missing saline values imputed to zero.  
+- **Full** (`df_full`): time-series CTT and pressure at baseline and ten-minute (then 30-minute) intervals for dynamic trajectory plots.
+
+Identifiers `horse`, `treatment`, and `period` were converted to factors. We initially created a composite `horse_period` factor to capture session‐specific variability (e.g., ambient humidity ranging 20–88%), but found that including `horse_period` as a random intercept explained essentially zero additional variance in TTA. Consequently, our primary linear mixed‐effects model (via **lmer** in **lme4**/**lmerTest**) specifies **treatment** as a fixed effect and **horse** as a single random intercept. To address right‐skew and heteroscedasticity revealed in our EDA, we applied a square‐root transformation to TTA within the model formula. Overall treatment effects were assessed with Type III F-tests (Satterthwaite’s approximation), and **emmeans** provided Tukey-adjusted pairwise contrasts with back-transformed estimated marginal means for clear interpretation. As a nonparametric alternative—and to ensure robustness against outliers (notably two prolonged DR sessions)—we also performed paired Wilcoxon signed-rank tests with Hodges–Lehmann confidence intervals for each outcome. Model adequacy was confirmed via residuals-vs-fitted and QQ-plots, and all tables and figures were produced with **kableExtra** and **ggplot2**.  
+
+# 3 Total Anesthesia Time
+
+## 3.1 Summary Statistics
+```{r tta-summary}
+##############################################
+#                                            #
+# RESPONSE VARIABLE 1: TOTAL ANESTHESIA TIME #
+#                                            #
+##############################################
+
+
+#creating summary table
+df_summ2 %>%
+  group_by(treatment) %>%
+  summarise(
+    N      = n(),
+    Mean   = mean(total_anesthesia_time_min),
+    SD     = sd(total_anesthesia_time_min),
+    Min    = min(total_anesthesia_time_min),
+    Median = median(total_anesthesia_time_min),
+    Max    = max(total_anesthesia_time_min)
+  ) %>%
+  kable(
+    caption = "Summary: Total Anesthesia Time by Treatment",
+    digits  = 1
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 3.2 Mixed Model (sqrt‐transformed with horse_period)
+```{r tta-sqrt-mixed,}
+#fitting lm model for sqrt transformed tta
+m_tta_hp <- lmer(
+  sqrt(total_anesthesia_time_min) ~ treatment +
+    (1 | horse),
+  data   = df_summ2,
+  REML   = TRUE
+)
+
+
+# Type III ANOVA
+anova_tbl_sqrt_hp <- as.data.frame(anova(m_tta_hp))
+anova_tbl_sqrt_hp %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>%  
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for sqrt(Total Anesthesia Time)",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 3.3 Estimated Marginal Means & Plot
+```{r tta-sqrt-emmeans}
+#running emmeans
+emm_sqrt_tta_hp <- emmeans(m_tta_hp, pairwise ~ treatment, adjust = "tukey")
+
+emm_sqrt_tta_hp$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Sqrt Transformed Total Anesthesia Time (Units: $min$))",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+
+# emmip plot
+emmip(emm_sqrt_tta_hp, ~ treatment, CI = TRUE, type = "response") +
+aes(color = treatment, fill = treatment) +
+  scale_color_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  ) +
+  scale_fill_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  )
+```
+
+## 3.4 Diagnostic Plots
+```{r}
+#residual v fitted plot
+resid_sqrt_tta_hp <- tibble(
+  fitted = fitted(m_tta_hp),
+  resid  = resid(m_tta_hp)
+)
+
+ggplot(resid_sqrt_tta_hp, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Sqrt Transformed Total Anesthesia Time",
+    subtitle = expression(paste("Response Units: min"))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_tta_hp)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Sqrt Transformed Total Anesthesia Time",
+    subtitle = expression(paste("Response Units: min")),
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 3.5 Wilcoxon Signed‐Rank Test
+```{r tta-wilcox}
+#paired DR vs R on df_summ2, ensuring complete pairs
+cts_tta <- df_summ2 %>%
+  filter(treatment %in% c("DR", "R")) %>%
+  select(horse, treatment, total_anesthesia_time_min) %>%
+  pivot_wider(
+    names_from = treatment,
+    values_from = total_anesthesia_time_min
+  ) %>%
+  filter(!is.na(DR) & !is.na(R))
+
+#run Wilcoxon signed‐rank test with Hodges–Lehmann CI
+wil_tta <- wilcox.test(
+  cts_tta$DR,
+  cts_tta$R,
+  paired   = TRUE,
+  exact    = FALSE,
+  conf.int = TRUE,
+  conf.level = 0.95
+)
+
+#summarize test results
+tibble(
+  Statistic    = wil_tta$statistic,
+  `HL Estimate`= wil_tta$estimate,
+  `95% Lower`  = wil_tta$conf.int[1],
+  `95% Upper`  = wil_tta$conf.int[2],
+  `p-value`    = wil_tta$p.value
+) %>%
+  kable(
+    caption = "Wilcoxon Test: Total Anesthesia Time (DR vs R)",
+    digits  = c(0,0,0,0,4)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 3.6 Interpretations
+
+The primary mixed‐effects analysis of Square-Root-TTA (using random intercepts for horse and horse_period) demonstrated a highly significant treatment effect (Type III F(2, 28) = 31.04, p < 0.0001).  Back‐transformed estimated marginal means revealed that DR (dexmedetomidine + ropivacaine) produced the longest anesthesia duration, significantly exceeding ropivacaine alone (R) (Tukey adjusted p = 0.021) and saline (S) (p < 0.0001), while R also outlasted S (p = 0.0005). Residuals‐vs‐fitted and QQ‐plots showed no major deviations from homoscedasticity or normality after transformation. A paired Wilcoxon signed‐rank test for DR versus R, however, did not confirm this difference (p = 0.076). Because it only considers paired differences and ignores between-horse variability, its power is lower than the mixed model’s, which uses all observations and models horse as a random effect.
+
+# 4 Minimum CTT
+
+## 4.1 Summary Table
+
+```{r}
+##########################################
+#                                        #
+# Response Variable 2 = Minimum CTT (cm) #
+#                                        #
+##########################################
+
+#summary table
+
+sum_mcct <- df_summ2 %>%
+  group_by(Treatment = treatment) %>%
+  summarize(
+    N = n(),
+    Mean = mean(minimum_ctt_cm, na.rm = TRUE),
+    SD = sd(minimum_ctt_cm, na.rm = TRUE),
+    Min = min(minimum_ctt_cm, na.rm = TRUE),
+    Median = median(minimum_ctt_cm, na.rm = TRUE),
+    Max = max(minimum_ctt_cm, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sum_mcct %>%
+  kable(
+    digits = 2,
+    format = "latex",
+    caption = "Summary of Minimum CTT (Units: $cm$) by Treatment",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = FALSE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 4.2 Mixed Model
+
+```{r}
+#fitting model
+
+m_mcct <- lmer(
+  minimum_ctt_cm ~ treatment + 
+    (1 | horse),
+  data = df_summ2
+)
+
+
+# capture the ANOVA table as a data.frame
+anova_tbl_mcct <- as.data.frame(anova(m_mcct))
+
+anova_tbl_mcct %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>% 
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for Minimun CCT",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 4.3 Estimated Marginal Means & Plot
+
+```{r}
+#running emmeans
+emm_mcct <- emmeans(m_mcct, pairwise ~ treatment, adjust = "tukey")
+
+emm_mcct$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Minimum CCT (Units: $cm$))",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+
+# emmip plot
+emmip(emm_mcct, ~ treatment, CI = TRUE, type = "response") +
+aes(color = treatment, fill = treatment) +
+  scale_color_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  ) +
+  scale_fill_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  )
+```
+
+## 4.4 Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_mcct <- tibble(
+  fitted = fitted(m_mcct),
+  resid  = resid(m_mcct)
+)
+
+ggplot(resid_mcct, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Minimum CTT",
+    subtitle = expression(paste("Response Units: cm"))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_mcct)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Minimum CTT",
+    subtitle = expression(paste("Response Units: cm")),
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 4.5 Wilcoxon Signed Rank Test
+```{r}
+# pivot to wide for DR and R
+wide_minctt <- df_summ %>%
+  filter(treatment %in% c("DR", "R")) %>%
+  select(horse, treatment, minimum_ctt_cm) %>%
+  pivot_wider(names_from = treatment, values_from = minimum_ctt_cm)
+
+# Run paired Wilcoxon test
+wil_mcct <- wilcox.test(wide_minctt$DR, wide_minctt$R, 
+                       paired = TRUE, exact = FALSE,
+                       conf.int = TRUE,
+                       conf.level = 0.95)
+
+
+#summarize results
+tibble(
+  Statistic      = wil_mcct$statistic,
+  `H‐L Estimate` = wil_mcct$estimate,
+  `95% Lower`    = wil_mcct$conf.int[1],
+  `95% Upper`    = wil_mcct$conf.int[2],
+  `p‐value`      = wil_mcct$p.value
+) %>%
+  kable(
+    caption = "Wilcoxon Signed-Rank Test with Hodges–Lehmann CI",
+    digits  = c(0, 0, 0, 0, 4)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 4.6 Interpretations
+
+In the minimum‐CTT model (using random intercepts for horse and horse_period), treatment was highly significant (Type III F(2, 25)=50.05, p<0.0001). Both DR and R produced deeper blockade than S (DR vs S p=4.06e-8; R vs S p=1.65e-6), but DR and R did not differ (p=0.114). Diagnostic plots showed no major deviations, and the paired Wilcoxon test (DR vs R p=0.11) agreed there is no meaningful DR>R difference in maximal desensitization.
+
+# 5 Duration of Min CTT
+## 5.1 Summary Table
+
+```{r}
+#######################################################
+#                                                     #
+# RESPONSE VARIABLE 3: DURATION OF MINIMUM CTT (mins) #
+#                                                     #
+#######################################################
+
+#summary table
+
+sum_dmcct <- df_summ2 %>%
+  group_by(Treatment = treatment) %>%
+  summarize(
+    N = n(),
+    Mean = mean(duration_of_min_ctt_min, na.rm = TRUE),
+    SD = sd(duration_of_min_ctt_min, na.rm = TRUE),
+    Min = min(duration_of_min_ctt_min, na.rm = TRUE),
+    Median = median(duration_of_min_ctt_min, na.rm = TRUE),
+    Max = max(duration_of_min_ctt_min, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sum_dmcct %>%
+  kable(
+    digits = 2,
+    format = "latex",
+    caption = "Summary of Duration of Minimum CTT (Units: $min$) by Treatment",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = FALSE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 5.2 Mixed Model
+
+```{r}
+#fitting model
+
+m_dmcct <- lmer(
+  duration_of_min_ctt_min ~ treatment + 
+    (1 | horse),
+  data = df_summ2
+)
+
+# capture the ANOVA table as a data.frame
+anova_tbl_dmcct <- as.data.frame(anova(m_dmcct))
+
+anova_tbl_dmcct %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>% 
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for Duration of Minimun CCT",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 5.3 Estimated Marginal Means & Plot
+
+```{r}
+#running emmeans
+emm_dmcct <- emmeans(m_dmcct, pairwise ~ treatment, adjust = "tukey")
+
+emm_dmcct$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Duration Minimum CCT (Units: $min$))",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+
+# emmip plot
+emmip(emm_dmcct, ~ treatment, CI = TRUE, type = "response") + 
+  aes(color = treatment, fill = treatment) +
+  scale_color_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  ) +
+  scale_fill_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  )
+```
+
+## 5.4 Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_dmcct <- tibble(
+  fitted = fitted(m_dmcct),
+  resid  = resid(m_dmcct)
+)
+
+ggplot(resid_dmcct, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Duration Minimum CCT (min)",
+    subtitle = expression(paste("Response Units: mins"))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_dmcct)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Duration Minimum CCT (min)",
+    subtitle = expression(paste("Response Units: mins")),
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 5.5 Wilconcox Signed‐Rank Test
+```{r}
+# pivot to wide for DR and R
+wide_dmctt <- df_summ %>%
+  filter(treatment %in% c("DR", "R")) %>%
+  select(horse, treatment, duration_of_min_ctt_min) %>%
+  pivot_wider(names_from = treatment, values_from = duration_of_min_ctt_min)
+
+# Run paired Wilcoxon test
+wil_dmcct <- wilcox.test(wide_dmctt$DR, wide_dmctt$R, 
+                       paired = TRUE, exact = FALSE,
+                       conf.int = TRUE,
+                       conf.level = 0.95)
+
+
+#summarize results
+tibble(
+  Statistic      = wil_dmcct$statistic,
+  `H‐L Estimate` = wil_dmcct$estimate,
+  `95% Lower`    = wil_dmcct$conf.int[1],
+  `95% Upper`    = wil_dmcct$conf.int[2],
+  `p‐value`      = wil_dmcct$p.value
+) %>%
+  kable(
+    caption = "Wilcoxon Signed-Rank Test with Hodges–Lehmann CI",
+    digits  = c(0, 0, 0, 0, 4)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 5.6 Interpretations
+
+The mixed‐effects model for duration of minimum CTT—using horse as a random intercept—revealed a borderline overall treatment effect (Type III F(2, 34) = 9.44, p = 0.0005). Tukey pairwise contrasts (Table 11) showed that DR (dexmedetomidine + ropivacaine) prolonged maximal desensitization by 13.00 min versus R (SE = 5.18; t = 2.51; p = 0.04799) and by 20.06 min versus S (SE = 4.63; t = 4.33; p = 0.00057).  The R vs S difference (7.06 min; SE = 4.63; t = 1.52; p = 0.29656) was not significant.  Residuals‐vs‐fitted and QQ‐plots indicated mild skew but an acceptable fit.  A paired Wilcoxon signed-rank test comparing DR to R (p = 0.089) produced a similar trend, supporting a modest dexmedetomidine-mediated extension of maximal blockade.    
+
+# 6 Maximum Corneal Pressure
+## 6.1 Summary Table
+
+```{r}
+#############################################
+#                                           #
+# RESPONSE VARIABLE 4: MAX CORNEAL PRESSURE #
+#                                           #
+#############################################
+
+#summary table
+
+sum_mp <- df_summ2 %>%
+  group_by(Treatment = treatment) %>%
+  summarize(
+    N = n(),
+    Mean = mean(maximum_corneal_pressure, na.rm = TRUE),
+    SD = sd(maximum_corneal_pressure, na.rm = TRUE),
+    Min = min(maximum_corneal_pressure, na.rm = TRUE),
+    Median = median(maximum_corneal_pressure, na.rm = TRUE),
+    Max = max(maximum_corneal_pressure, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sum_mp %>%
+  kable(
+    digits = 2,
+    format = "latex",
+    caption = paste("Summary of Maximum Corneal Pressure ($g/mm^2$) by Treatment"),
+    longtable = FALSE,
+    escape = FALSE
+  ) %>%
+  kable_styling(full_width = FALSE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 6.2 Mixed Model
+
+```{r}
+#fitting model
+
+m_mp <- lmer(
+  maximum_corneal_pressure ~ treatment + 
+    (1 | horse),
+  data = df_summ2
+)
+
+# capture the ANOVA table as a data.frame
+anova_tbl_mp <- as.data.frame(anova(m_mp))
+
+anova_tbl_mp %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>% 
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for Max Corneal Pressure",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 6.3 Estimated Marginal Means & Plot
+
+```{r}
+#running emmeans
+emm_mp <- emmeans(m_mp, pairwise ~ treatment, adjust = "tukey")
+
+emm_mp$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Maximum Corneal Pressure (Units: $g/mm^2$))",
+    longtable = FALSE,
+    escape = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+
+# emmip plot
+emmip(emm_mp, ~ treatment, CI = TRUE, type = "response") +
+aes(color = treatment, fill = treatment) +
+  scale_color_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  ) +
+  scale_fill_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  )
+```
+
+## 6.4 Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_mp <- tibble(
+  fitted = fitted(m_mp),
+  resid  = resid(m_mp)
+)
+
+ggplot(resid_mp, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Maximum Corneal Pressure",
+    subtitle = expression(paste("Response Units: ", g/mm^2))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_mp)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Maximum Conreal Pressure",
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles",
+    subtitle = expression(paste("Response Units: ", g/mm^2))
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 6.5 Wilcoxon Signed Rank Test
+```{r}
+# pivot to wide for DR and R
+wide_mp <- df_summ %>%
+  filter(treatment %in% c("DR", "R")) %>%
+  select(horse, treatment, maximum_corneal_pressure) %>%
+  pivot_wider(names_from = treatment, values_from = maximum_corneal_pressure)
+
+# Run paired Wilcoxon test
+wil_mp <- wilcox.test(wide_mp$DR, wide_mp$R, 
+                       paired = TRUE, exact = FALSE,
+                       conf.int = TRUE,
+                       conf.level = 0.95)
+
+
+#summarize results
+tibble(
+  Statistic      = wil_mp$statistic,
+  `H‐L Estimate` = wil_mp$estimate,
+  `95% Lower`    = wil_mp$conf.int[1],
+  `95% Upper`    = wil_mp$conf.int[2],
+  `p‐value`      = wil_mp$p.value
+) %>%
+  kable(
+    caption = "Wilcoxon Signed-Rank Test with Hodges–Lehmann CI",
+    digits  = c(0, 0, 0, 0, 4)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 6.6 Interpretations
+
+The mixed‐effects model for maximum corneal pressure—using horse as a random intercept—revealed a highly significant overall treatment effect (Type III F(2, 37) = 37.47, p = 1.28e-9).  Tukey pairwise contrasts (Table 15) showed that DR (dexmedetomidine + ropivacaine) produced a 62.97 $g/mm^2$ higher peak pressure than R (SE = 24.35; t = 2.59; p = 0.03912) and a 173.70 g/mm² higher peak than S (SE = 21.08; t = 8.24; p = 1.71e-8).  R also exceeded S by 110.73 $g/mm^2$ (SE = 21.08; t = 5.25; p = 4.05e-5). Residuals-vs-fitted and QQ-plots indicated only mild departures at the extremes and an overall acceptable fit.  A paired Wilcoxon signed-rank test comparing DR and R (Statistic = 231; Hodges–Lehmann estimate = 14 $g/mm^2$; 95% CI = –78 to 197; p = 0.1508) confirmed that the nonparametric difference in peak pressure between those two treatments was not statistically significant.
+
+# 7 Hemorrhage Score
+
+## 7.1 Summary Stats
+```{r hem-summary}
+########################################
+#                                      #
+# RESPONSE VARIABLE : HEMORRHAGE SCORE #
+#                                      #
+########################################
+
+df_summ3 %>%
+  group_by(treatment) %>%
+  summarise(
+    N      = n(),
+    Median = median(hem_score, na.rm = TRUE),
+    Mean   = mean(hem_score, na.rm = TRUE),
+    SD     = sd(hem_score, na.rm = TRUE),
+    Min    = min(hem_score, na.rm = TRUE),
+    Max    = max(hem_score, na.rm = TRUE)
+  ) %>%
+  kable(
+    caption = "Summary: Hemorrhage Score by Treatment",
+    digits  = c(0,1,1,2,0,0)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 7.2 Wilcoxon Signed-Rank Test
+```{r hem-wilcox}
+#pivot to wide for DR and R
+wide_hem <- df_summ3 %>%
+  filter(treatment %in% c("DR", "R")) %>%
+  select(horse, treatment, hem_score) %>%
+  pivot_wider(names_from = treatment, values_from = hem_score)
+
+#run paired Wilcoxon test
+wil_hem <- wilcox.test(wide_hem$DR, wide_hem$R, 
+                       paired = TRUE, exact = FALSE,
+                       conf.int = TRUE,
+                       conf.level = 0.95)
+
+
+#summarize results
+tibble(
+  Statistic      = wil_hem$statistic,
+  `H‐L Estimate` = wil_hem$estimate,
+  `95% Lower`    = wil_hem$conf.int[1],
+  `95% Upper`    = wil_hem$conf.int[2],
+  `p‐value`      = wil_hem$p.value
+) %>%
+  kable(
+    caption = "Wilcoxon Signed-Rank Test with Hodges–Lehmann CI",
+    digits  = c(0, 0, 0, 0, 4)
+  ) %>%
+  kable_styling(full_width = FALSE)
+``` 
+
+## 7.3 Interpretations
+
+The Wilcoxon signed‐rank DR vs R test (p=0.82) confirmed that adding dexmedetomidine does not appreciably increase hemorrhage risk.
+
+# 8 Full Time Courses
+
+## 8.1 Single Horse Timeline
+
+```{r full-ctt-timecourse-one-treatment, warning=FALSE, message=FALSE}
+#############################################
+#                                           #
+# TIME COURSE FOR ONE HORSE, ONE TREATMENT  #
+#                                           #
+#############################################
+
+
+#making subset for one horse (and changing CTT to long form)
+df_one_ctt <- df_full %>%
+  filter(Horse == sel_horse, Treatment == sel_trt, Variable == "CTT (cm)") %>%
+  pivot_longer(
+    cols = c('Time.-.Baseline', matches("^[0-9]+$")),
+    names_to  = "time_label",
+    values_to = "ctt_cm"
+  ) %>%
+  mutate(
+    #parse whatever digits are in the label
+    time_min = parse_number(time_label),
+    #replace that NA with 0
+    time_min = replace_na(time_min, 0)
+  )
+
+#plotting
+ggplot(df_one_ctt, aes(x = time_min, y = ctt_cm)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(
+    title = paste0("CTT (cm) Over Time: Horse ", sel_horse, " (", sel_trt, ")"),
+    x     = "Time (min)",
+    y     = "CTT (cm)"
+  ) +
+  theme_minimal(base_size = 14)
+
+#associated table
+#pull the matching summarized row into a new object
+example_summary_matched2 <- df_summ2 %>%
+  filter(horse == sel_horse, treatment == sel_trt) %>%
+  select(
+    minimum_ctt_cm,
+    duration_of_min_ctt_min,
+    total_anesthesia_time_min
+  )
+
+#pivot longer so we have Metric / Value
+example_summary_matched2_long <- example_summary_matched2 %>%
+  pivot_longer(
+    cols      = everything(),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = recode(Metric,
+      minimum_ctt_cm            = "Minimum CTT (cm)",
+      duration_of_min_ctt_min   = "Duration of Min CTT (min)",
+      total_anesthesia_time_min = "Total Anesthesia Time (min)"
+    )
+  )
+
+#print it
+example_summary_matched2_long %>%
+  kable(
+    col.names = c("Metric", "Value"),
+    caption   = paste0(
+      "Summarized Metrics for Horse ",
+      sel_horse, " (Treatment ", sel_trt, ")"
+    )
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    font_size         = 12,
+    latex_options = c("hold_position", "scale_down")
+  )
+```
+
+```{r}
+##############################################
+#                                            #
+# TIME COURSE FOR ONE HORSE, ALL TREATMENTs  #
+#                                            #
+##############################################
+
+#creating long df of full data
+df_full_long <- df_full %>%
+  pivot_longer(
+    cols      = -c(Horse, Treatment, Variable),
+    names_to  = "time_label",
+    values_to = "value"
+  ) %>%
+  mutate(
+    time_min = replace_na(suppressWarnings(as.numeric(time_label)), 0)
+  ) %>%
+  filter(!is.na(time_min))
+
+# grab CTT for this one horse, all treatments
+df_one_horse_ctt <- df_full_long %>%
+  filter(
+    Horse    == sel_horse,
+    Variable == "CTT (cm)"
+  )
+
+ggplot(df_one_horse_ctt, aes(x = time_min, y = value, color = Treatment)) +
+  geom_line(size = 1, alpha = 0.7) +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  ) +
+  labs(
+    title = paste0("CTT Over Time: Horse ", sel_horse, " Across Treatments"),
+    x     = "Time (min)",
+    y     = "CTT (cm)",
+    color = "Treatment"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+## 8.2 All Horse Timeline
+```{r, full-ctt-timecourse-all, warning=FALSE, message=FALSE}
+# Overlay CTT timelines for all horses for the selected treatment
+df_full_long %>%
+  filter(Variable == "CTT (cm)", Treatment == sel_trt) %>%
+  ggplot(aes(
+    x     = time_min,
+    y     = value,
+    group = Horse,
+    color = as.factor(Horse)
+  )) +
+  geom_line(alpha = 0.7, size = 1) +
+  labs(
+    title = paste0("CTT Over Time for Treatment ", sel_trt),
+    x     = "Time (min)",
+    y     = "CTT (cm)",
+    color = "Horse"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+## 8.3 CCT and Corneal Pressure time course, ALL TREATMENTS
+
+```{r full-ctt-timecourse-single, warning=FALSE, message=FALSE}
+####################################################################
+#                                                                  #
+# CCT AND CORNEAL PRESSURE TIME COURSE FOR 1 HORSE, ALL TREATMENTS #
+#                                                                  #
+####################################################################
+
+
+#summarize just the CTT data
+df_ctt_timecourse <- df_full_long %>%
+  filter(Variable == "CTT (cm)", !is.na(value)) %>%
+  group_by(time_min, Treatment) %>%
+  summarise(
+    med = median(value, na.rm = TRUE),
+    lo  = min(value,    na.rm = TRUE),
+    hi  = max(value,    na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#plot
+ggplot(df_ctt_timecourse, aes(x = time_min, y = med, color = Treatment, fill = Treatment)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2) +
+  geom_line(size = 1) +
+  scale_color_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  ) +
+  labs(
+    title = "CTT Time Course: Median ± Min/Max by Treatment",
+    x     = "Time (min)",
+    y     = "CTT (cm)"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+## 8.4 Corneal Pressure Time Course for One Horse, All Treatments
+
+```{r, full-cp-timecourse-single, warning=FALSE, message=FALSE}
+#summarize just the Corneal Pressure data
+df_cp_timecourse <- df_full_long %>%
+  filter(Variable == "Corneal Pressure (g/mm2)", !is.na(value)) %>%
+  group_by(time_min, Treatment) %>%
+  summarise(
+    med = median(value, na.rm = TRUE),
+    lo  = min(value,    na.rm = TRUE),
+    hi  = max(value,    na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#plot
+ggplot(df_cp_timecourse, aes(x = time_min, y = med, color = Treatment, fill = Treatment)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2) +
+  geom_line(size = 1) +
+  scale_color_manual(                          
+    values = c(
+      DR = "steelblue",   
+      R  = "orange",  
+      S  = "#009E73"  
+    )
+  ) +
+  labs(
+    title = "Corneal Pressure Time Course: Median ± Min/Max, \nby Treatment",
+    x     = "Time (min)",
+    y     = "Pressure (g/mm2)"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+Section 8 begins with a detailed “single‐horse timeline” of CTT for Horse 8 under DR (plot 8.1 and its accompanying summary table), showing the rapid drop to zero sensitivity, a sustained plateau at maximal anesthesia, and the eventual return to baseline. Next, the CTT curves for that same horse across all three treatments make it clear that DR produces both the deepest blockade and the longest recovery compared to R and saline. Additionally, plot 8.2 overlays every horse’s CTT curve under the DR treatment and clearly shows that, under dexmedetomidine + ropivacaine, most animals maintain near-zero corneal touch thresholds for well over two hours. A few recover slightly earlier and out two outliers way later -- highlighting both the uniformly prolonged blockade and the remaining individual variability. We then move to group‐level summaries: plot 8.3 presents the median $\pm$ min/max CTT over time for each treatment, illustrating that DR maintains a median filamental length of zero longer and with tighter bounds than R or S, while saline rebounds almost immediately. Finally, plot 8.4 offers the same median $\pm$ min/max ribbon format for corneal pressure, confirming that DR also sustains reduced tonometry readings farther and more consistently than the other treatments. Together, these four graphics—from individual trajectories to aggregated ribbons—visually reinforce that dexmedetomidine + ropivacaine outperforms ropivacaine alone and saline in both depth and uniformity of corneal anesthesia.
+
+
+# 9 Appendix
+
+```{r show-code, ref.label = all_labels(), echo = TRUE, eval = FALSE}
+
+```

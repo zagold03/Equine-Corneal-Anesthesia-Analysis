@@ -1,0 +1,249 @@
+---
+title: "Single Horse Timeline"
+author: "Zach Goldstein"
+date: "2025-06-04"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, echo = FALSE, warning = FALSE)
+set.seed(12345)
+```
+
+```{r package setup, include = FALSE}
+library(openxlsx)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(kableExtra)
+```
+
+```{r}
+#read in full sheet from xlsx file
+df_full <- read.xlsx("Ropivacaine_Dexmed_Data_AH.xlsx", sheet = "Full") %>%
+  #drop any completely empty rows
+  filter(!is.na(Variable))
+
+#choosing horse (THIS ALLOWS FOR VERY EASY MANIPULATION AND VIEWING FOR HORSES AND TREATMENTS)
+sel_horse <- "8"
+sel_trt   <- "DR"
+ 
+```
+
+```{r}
+#making subset for one horse (and changing CTT to long form)
+df_one_ctt <- df_full %>%
+  filter(Horse == sel_horse, Treatment == sel_trt, Variable == "CTT (cm)") %>%
+  pivot_longer(
+    cols = c('Time.-.Baseline', matches("^[0-9]+$")),
+    names_to  = "time_label",
+    values_to = "ctt_cm"
+  ) %>%
+  mutate(
+    #parse whatever digits are in the label
+    time_min = parse_number(time_label),
+    #replace that NA with 0
+    time_min = replace_na(time_min, 0)
+  )
+
+#plotting
+ggplot(df_one_ctt, aes(x = time_min, y = ctt_cm)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(
+    title = paste0("CTT (cm) Over Time: Horse ", sel_horse, " (", sel_trt, ")"),
+    x     = "Time (min)",
+    y     = "CTT (cm)"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+
+```{r}
+#Summarized Table (From Excel)
+df_summ2 <- read.xlsx(
+  "Ropivacaine_Dexmed_Data_AH.xlsx",
+  sheet = "Summarized"
+) %>%
+  rename(
+    horse                     = Horse,
+    treatment                 = Treatment,
+    period                    = Period,
+    minimum_ctt_cm            = `Minimum.CTT.(cm)`,
+    duration_of_min_ctt_min   = `Duration.of.Min.CTT.(min)`,
+    maximum_corneal_pressure  = Maximum.corneal.pressure,
+    total_anesthesia_time_min = `Total.Anesthesia.Time.(min)`
+  ) %>%
+  mutate(
+    horse     = factor(horse),
+    treatment = factor(treatment, levels = c("DR", "R", "S")),
+    period    = factor(period)
+  )
+
+#pull the matching summarized row into a new object
+example_summary_matched2 <- df_summ2 %>%
+  filter(horse == sel_horse, treatment == sel_trt) %>%
+  select(
+    minimum_ctt_cm,
+    duration_of_min_ctt_min,
+    total_anesthesia_time_min
+  )
+
+#pivot longer so we have Metric / Value
+example_summary_matched2_long <- example_summary_matched2 %>%
+  pivot_longer(
+    cols      = everything(),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = recode(Metric,
+      minimum_ctt_cm            = "Minimum CTT (cm)",
+      duration_of_min_ctt_min   = "Duration of Min CTT (min)",
+      total_anesthesia_time_min = "Total Anesthesia Time (min)"
+    )
+  )
+
+#print it
+example_summary_matched2_long %>%
+  kable(
+    col.names = c("Metric", "Value"),
+    caption   = paste0(
+      "Summarized Metrics for Horse ",
+      sel_horse, " (Treatment ", sel_trt, ")"
+    )
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    font_size         = 12,
+    latex_options = c("hold_position", "scale_down")
+  )
+```
+
+```{r}
+#Summarized Table (By Hand)
+
+#recompute only from df_one_ctt:
+example_summary_ctt_only <- df_one_ctt %>%
+  summarise(
+    `Minimum CTT (cm)`          = min(ctt_cm, na.rm = TRUE),
+    # sum the number of times at that minimum, then *10 min per interval
+    `Duration of Min CTT (min)` = sum(ctt_cm == `Minimum CTT (cm)`, na.rm = TRUE) * 10,
+    `Total Anesthesia Time (min)` = {
+      # baseline at t=0
+      baseline_val <- first(ctt_cm[time_min == 0], default = NA_real_)
+      # remove the t=0 row before looking for returns
+      tmp <- df_one_ctt %>% filter(time_min > 0)
+      is_base <- tmp$ctt_cm == baseline_val
+      times2  <- tmp$time_min
+      # find first pair of consecutive TRUEs
+      consec  <- which(is_base[-length(is_base)] & is_base[-1])
+      if (length(consec) > 0) times2[consec[1]] 
+      else max(times2[!is.na(tmp$ctt_cm)], na.rm = TRUE)
+    }
+  )
+
+#pivot longer and print
+example_summary_ctt_only %>%
+  pivot_longer(
+    cols      = everything(),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  kable(
+    col.names = c("Metric", "Value"),
+    caption   = paste0(
+      "Manual CTT‐Only Summary for Horse ", sel_horse,
+      " (Treatment ", sel_trt, ")"
+    )
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width        = FALSE,
+    font_size         = 12
+  )
+```
+
+
+# Working With ALL Horses
+```{r}
+df_full_long <- df_full %>%
+  pivot_longer(
+    cols      = -c(Horse, Treatment, Variable),
+    names_to  = "time_label",
+    values_to = "value"
+  ) %>%
+  mutate(
+    time_min = replace_na(suppressWarnings(as.numeric(time_label)), 0)
+  ) %>%
+  filter(!is.na(time_min))
+
+# summarize only at actual measurement times, allow each panel its own x- and y-limits
+df_timecourse_summary <- df_full_long %>%
+  filter(
+    Variable %in% c("CTT (cm)", "Corneal Pressure (g/mm2)"),
+    !is.na(value)
+  ) %>%
+  group_by(time_min, Treatment, Variable) %>%
+  summarise(
+    med = median(value, na.rm = TRUE),
+    lo  = min(value,    na.rm = TRUE),
+    hi  = max(value,    na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(df_timecourse_summary, aes(x = time_min, y = med, color = Treatment, fill = Treatment)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2, color = NA) +
+  geom_line(size = 1) +
+  facet_wrap(~ Variable, scales = "free") +
+  labs(
+    title = "Full Time Course: Median ± Min/Max by Treatment",
+    x     = "Time (min)",
+    y     = NULL
+  ) +
+  theme_minimal(base_size = 14)
+```
+```{r}
+# 1) Pull the already‐computed CTT TTA from your summary object
+ctt_tta_val <- example_summary_matched2_long %>%
+  filter(Metric == "Total Anesthesia Time (min)") %>%
+  pull(Value)
+
+# 2) Compute Pressure‐based TTA: two consecutive returns within ±0.5, take the *second* one
+pressure_df <- df_full_long %>%
+  filter(
+    Horse     == sel_horse,
+    Treatment == sel_trt,
+    Variable  == "Corneal Pressure (g/mm2)"
+  )
+
+baseline_cp <- first(pressure_df$value[pressure_df$time_min == 0])
+
+# drop time 0, flag close readings, then find the consecutive pairs
+df2    <- pressure_df %>% filter(time_min > 0)
+ok     <- abs(df2$value - baseline_cp) <= 0.5
+times  <- df2$time_min
+consec <- which(ok[-length(ok)] & ok[-1])
+
+# take the *second* of the first consecutive pair
+tta_cp <- if (length(consec)) times[consec[1] + 1] else NA_real_
+
+# 3) Print the comparison table
+tibble(
+  Metric = c(
+    "Total Anesthesia Time (CTT) (min)",
+    "Total Anesthesia Time (Pressure) (min)"
+  ),
+  Value  = c(ctt_tta_val, tta_cp)
+) %>%
+  kable(
+    col.names = c("Metric", "Value"),
+    caption   = paste0(
+      "Comparison of Total Anesthesia Time by CTT vs Pressure\n",
+      "Horse ", sel_horse, " (Treatment ", sel_trt, ")"
+    )
+  ) %>%
+  kable_styling(full_width = FALSE)
+```

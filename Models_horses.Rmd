@@ -1,0 +1,990 @@
+---
+title: "Model Tests"
+author: "Zach Goldstein"
+date: "2025-05-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, echo = FALSE, warning = FALSE)
+set.seed(12345)
+```
+
+```{r package-setup, include = FALSE}
+#Installing Packages
+library(tidyverse)
+library(openxlsx)
+library(ggplot2)
+library(janitor)
+library(dplyr)
+library(scales)
+library(lme4)
+library(lmerTest) 
+library(emmeans)
+library(kableExtra)
+library(broom.mixed)
+library(broom)
+
+
+```
+
+```{r}
+#loading in package
+
+df_summ <- read.xlsx("Ropivacaine_Dexmed_Data_AH.xlsx", sheet = "Summarized") %>%
+  rename(
+    horse                     = Horse,
+    treatment                 = Treatment,
+    period                    = Period,
+    minimum_ctt_cm            = `Minimum.CTT.(cm)`,
+    duration_of_min_ctt_min   = `Duration.of.Min.CTT.(min)`,
+    maximum_corneal_pressure  = Maximum.corneal.pressure,
+    total_anesthesia_time_min = `Total.Anesthesia.Time.(min)`
+  ) %>%
+  mutate(
+    horse     = factor(horse),
+    treatment = factor(treatment, levels = c("DR", "R", "S")),
+    period    = factor(period)
+  )
+```
+
+```{r, results = 'hide'}
+
+df_summ3 <- df_summ %>%
+  mutate(
+    horse_period = interaction(horse, period, sep = "_")
+  )
+```
+
+# 7. Adding in HemScore
+```{r}
+#Load the hemorrhage‐score sheet, keeping only horse, treatment, and score
+df_hem <- read.xlsx("Ropivacaine_Dexmed_Data_AH.xlsx", sheet = "HemScore") %>%
+  clean_names() %>%
+  #Turn the numeric horse ID into the same factor as in df_summ3:
+  mutate(
+    horse     = factor(horse, levels = levels(df_summ3$horse)),
+    treatment = factor(treatment, levels = levels(df_summ3$treatment)),
+    hem_score = replace_na(hemorrhage_score, 0)
+  ) %>%
+  select(horse, treatment, hem_score)
+#Left‐join onto df_summ3 by just horse & treatment
+df_summ4 <- df_summ3 %>%
+  left_join(df_hem, by = c("horse", "treatment")) %>%
+  #now period is untouched from df_summ3, and horse_period can be generated:
+  mutate(
+    period        = factor(period),
+    horse_period  = interaction(horse, period, sep = "_")
+  )
+```
+
+# 1. Response = total_anesthesia_time_min
+
+## 1a. Summary Table
+
+```{r}
+######
+# Response = Total Anesthesia Time
+######
+
+#summary table
+
+sum_tta <- df_summ %>%
+  group_by(Treatment = treatment) %>%
+  summarize(
+    N = n(),
+    Mean = mean(total_anesthesia_time_min, na.rm = TRUE),
+    SD = sd(total_anesthesia_time_min, na.rm = TRUE),
+    Min = min(total_anesthesia_time_min, na.rm = TRUE),
+    Median = median(total_anesthesia_time_min, na.rm = TRUE),
+    Max = max(total_anesthesia_time_min, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sum_tta %>%
+  kable(
+    digits = 2,
+    format = "latex",
+    caption = "Summary of Total Anesthesia Time (Units: $min$) by Treatment",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = FALSE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 1b. Fit LMM
+
+```{r, results = 'hide'}
+#fitting model
+
+m_tta <- lmer(
+  total_anesthesia_time_min ~ treatment + period + (1 | horse),
+  data = df_summ
+)
+summary(m_tta)
+```
+
+## 1c. Global F Test
+
+```{r}
+
+# capture the ANOVA table as a data.frame
+anova_m_tta <- as.data.frame(anova(m_tta))
+
+anova_m_tta %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>% 
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for Duration of Total Anesthesia Time",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 1d. Pairwise (Tukey) Comnparisons for Treatment
+
+```{r}
+#running emmeans
+emm_tta <- emmeans(m_tta, pairwise ~ treatment, adjust = "tukey")
+
+emm_tta$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Total Anesthesia Time (Units: $min$))",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 1e. Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_tta <- tibble(
+  fitted = fitted(m_tta),
+  resid  = resid(m_tta)
+)
+
+ggplot(resid_tta, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Total Anesthesia Time",
+    subtitle = expression(paste("Response Units: mins"))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_tta)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Total Anesthesia Time",
+    subtitle = expression(paste("Response Units: mins")),
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# 2. Response = minimum_ctt_cm
+
+## 2a. Summary Table
+
+```{r}
+######
+# Response = Minimum CTT (cm)
+######
+
+#summary table
+
+sum_mcct <- df_summ %>%
+  group_by(Treatment = treatment) %>%
+  summarize(
+    N = n(),
+    Mean = mean(minimum_ctt_cm, na.rm = TRUE),
+    SD = sd(minimum_ctt_cm, na.rm = TRUE),
+    Min = min(minimum_ctt_cm, na.rm = TRUE),
+    Median = median(minimum_ctt_cm, na.rm = TRUE),
+    Max = max(minimum_ctt_cm, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sum_mcct %>%
+  kable(
+    digits = 2,
+    format = "latex",
+    caption = "Summary of Minimum CTT (Units: $cm$) by Treatment",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = FALSE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 2b. Fit LMM
+
+```{r, , results = 'hide'}
+#fitting model
+
+m_mcct <- lmer(
+  minimum_ctt_cm ~ treatment + period + (1 | horse),
+  data = df_summ4
+)
+summary(m_mcct)
+```
+
+## 2c. Global F Test
+
+```{r}
+
+# capture the ANOVA table as a data.frame
+anova_tbl_mcct <- as.data.frame(anova(m_mcct))
+
+anova_tbl_mcct %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>% 
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for Minimun CCT",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 2d. Pairwise (Tukey) Comnparisons for Treatment
+
+```{r}
+#running emmeans
+emm_mcct <- emmeans(m_mcct, pairwise ~ treatment, adjust = "tukey")
+
+emm_mcct$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Minimum CCT (Units: $cm$))",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 2e. Wilcoxon Signed Rank Test
+```{r}
+# pivot to wide for DR and R
+wide_minctt <- df_summ %>%
+  filter(treatment %in% c("DR", "R")) %>%
+  select(horse, treatment, minimum_ctt_cm) %>%
+  pivot_wider(names_from = treatment, values_from = minimum_ctt_cm)
+
+# Run paired Wilcoxon test
+wil_mcct <- wilcox.test(wide_minctt$DR, wide_minctt$R, 
+                       paired = TRUE, exact = FALSE,
+                       conf.int = TRUE,
+                       conf.level = 0.95)
+
+
+#summarize results
+tibble(
+  Statistic      = wil_mcct$statistic,
+  `H‐L Estimate` = wil_mcct$estimate,
+  `95% Lower`    = wil_mcct$conf.int[1],
+  `95% Upper`    = wil_mcct$conf.int[2],
+  `p‐value`      = wil_mcct$p.value
+) %>%
+  kable(
+    caption = "Wilcoxon Signed-Rank Test with Hodges–Lehmann CI",
+    digits  = c(0, 0, 0, 0, 4)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 2f. Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_mcct <- tibble(
+  fitted = fitted(m_mcct),
+  resid  = resid(m_mcct)
+)
+
+ggplot(resid_mcct, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Minimum CTT",
+    subtitle = expression(paste("Response Units: cm"))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_mcct)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Minimum CTT",
+    subtitle = expression(paste("Response Units: cm")),
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# 3. Response = duration_of_min_ctt_min
+
+## 3a. Summary Table
+
+```{r}
+######
+# Response = Minimum CTT (cm)
+######
+
+#summary table
+
+sum_dmcct <- df_summ %>%
+  group_by(Treatment = treatment) %>%
+  summarize(
+    N = n(),
+    Mean = mean(duration_of_min_ctt_min, na.rm = TRUE),
+    SD = sd(duration_of_min_ctt_min, na.rm = TRUE),
+    Min = min(duration_of_min_ctt_min, na.rm = TRUE),
+    Median = median(duration_of_min_ctt_min, na.rm = TRUE),
+    Max = max(duration_of_min_ctt_min, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sum_dmcct %>%
+  kable(
+    digits = 2,
+    format = "latex",
+    caption = "Summary of Duration of Minimum CTT (Units: $min$) by Treatment",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = FALSE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 3b. Fit LMM
+
+```{r, results = 'hide'}
+#fitting model
+
+m_dmcct <- lmer(
+  duration_of_min_ctt_min ~ treatment + period + (1 | horse),
+  data = df_summ
+)
+summary(m_dmcct)
+```
+
+## 3c. Global F Test
+
+```{r}
+# capture the ANOVA table as a data.frame
+anova_tbl_dmcct <- as.data.frame(anova(m_dmcct))
+
+anova_tbl_dmcct %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>% 
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for Duration of Minimun CCT",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 3d. Pairwise (Tukey) Comnparisons for Treatment
+
+```{r}
+#running emmeans
+emm_dmcct <- emmeans(m_dmcct, pairwise ~ treatment, adjust = "tukey")
+
+emm_dmcct$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Duration Minimum CCT (Units: $min$))",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 3e. Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_dmcct <- tibble(
+  fitted = fitted(m_dmcct),
+  resid  = resid(m_dmcct)
+)
+
+ggplot(resid_dmcct, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Duration Minimum CCT (min)",
+    subtitle = expression(paste("Response Units: mins"))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_mcct)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Duration Minimum CCT (min)",
+    subtitle = expression(paste("Response Units: mins")),
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# 4. Response = maximum_corneal_pressure
+
+## 4a. Summary Table
+
+```{r}
+######
+# Response = Total Anesthesia Time
+######
+
+#summary table
+
+sum_mp <- df_summ %>%
+  group_by(Treatment = treatment) %>%
+  summarize(
+    N = n(),
+    Mean = mean(maximum_corneal_pressure, na.rm = TRUE),
+    SD = sd(maximum_corneal_pressure, na.rm = TRUE),
+    Min = min(maximum_corneal_pressure, na.rm = TRUE),
+    Median = median(maximum_corneal_pressure, na.rm = TRUE),
+    Max = max(maximum_corneal_pressure, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sum_mp %>%
+  kable(
+    digits = 2,
+    format = "latex",
+    caption = paste("Summary of Maximum Corneal Pressure ($g/mm^2$) by Treatment"),
+    longtable = FALSE,
+    escape = FALSE
+  ) %>%
+  kable_styling(full_width = FALSE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 4b. Fit LMM
+
+```{r, results = 'hide'}
+#fitting model
+
+m_mp <- lmer(
+  maximum_corneal_pressure ~ treatment + period + (1 | horse),
+  data = df_summ
+)
+summary(m_mp)
+```
+
+## 4c. Global F Test
+
+```{r}
+# capture the ANOVA table as a data.frame
+anova_tbl_mp <- as.data.frame(anova(m_mp))
+
+anova_tbl_mp %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>% 
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for Max Corneal Pressure",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 4d. Pairwise (Tukey) Comnparisons for Treatment
+
+```{r}
+#running emmeans
+emm_mp <- emmeans(m_mp, pairwise ~ treatment, adjust = "tukey")
+
+emm_mp$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Maximum Corneal Pressure (Units: $g/mm^2$))",
+    longtable = FALSE,
+    escape = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 4e. Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_mp <- tibble(
+  fitted = fitted(m_mp),
+  resid  = resid(m_mp)
+)
+
+ggplot(resid_mp, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Maximum Corneal Pressure",
+    subtitle = expression(paste("Response Units: ", g/mm^2))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_tta)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Maximum Conreal Pressure",
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles",
+    subtitle = expression(paste("Response Units: ", g/mm^2))
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# 5. Tweaking the Models
+
+## 5a. Fitting A Log Transform vs Sqrt for total_anesthesia_time_min
+
+```{r}
+# 1. Sqrt‐transformed model
+m_tta_log1p <- lmer(
+  log1p(total_anesthesia_time_min) ~ treatment + (1 | horse),
+  data = df_summ, REML = FALSE
+)
+
+# 2. Sqrt‐transformed model
+m_tta_sqrt <- lmer(
+  sqrt(total_anesthesia_time_min) ~ treatment + (1 | horse),
+  data = df_summ, REML = FALSE
+)
+
+# 3. Diagnostic data frames
+diag_log1p <- tibble(
+  fitted = fitted(m_tta_log1p),
+  resid  = residuals(m_tta_log1p)
+)
+diag_sqrt <- tibble(
+  fitted = fitted(m_tta_sqrt),
+  resid  = residuals(m_tta_sqrt)
+)
+
+# 4. Plot diagnostics side by side
+p1 <- ggplot(diag_log1p, aes(fitted, resid)) +
+  geom_point(alpha = .6) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  labs(title = "Residuals vs Fitted: log1p(TTA)")
+
+p2 <- ggplot(data.frame(resid = residuals(m_tta_log1p)), aes(sample = resid)) +
+  stat_qq() + stat_qq_line() +
+  labs(title = "QQ-Plot: log1p(TTA)")
+
+p3 <- ggplot(diag_sqrt, aes(fitted, resid)) +
+  geom_point(alpha = .6) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  labs(title = "Residuals vs Fitted: sqrt(TTA)")
+
+p4 <- ggplot(data.frame(resid = residuals(m_tta_sqrt)), aes(sample = resid)) +
+  stat_qq() + stat_qq_line() +
+  labs(title = "QQ-Plot: sqrt(TTA)")
+
+# Print a 2×2 grid
+library(patchwork)
+(p1 | p3) / (p2 | p4)
+```
+
+## 5b. Global F Test.
+
+```{r}
+#########
+# WE CHOSE TO WORK WITH THE SQAURE ROOT TRANSFORMATION
+########
+# 1. Capture the ANOVA table as a data.frame
+anova_tbl_sqrt <- as.data.frame(anova(m_tta_sqrt))
+
+anova_tbl_sqrt %>%
+  rownames_to_column("Term") %>%
+  filter(Term == "treatment") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>%  
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for sqrt(Total Anesthesia Time)",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 5d. Pairwise (Tukey) Comnparisons for Treatment
+
+```{r}
+#running emmeans
+emm_sqrt_tta <- emmeans(m_tta_sqrt, pairwise ~ treatment, adjust = "tukey")
+
+emm_sqrt_tta$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Sqrt Transformed Total Anesthesia Time (Units: $min$))",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 5e. Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_sqrt_tta <- tibble(
+  fitted = fitted(m_tta_sqrt),
+  resid  = resid(m_tta_sqrt)
+)
+
+ggplot(resid_sqrt_tta, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Sqrt Transformed Total Anesthesia Time",
+    subtitle = expression(paste("Response Units: min"))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_tta_sqrt)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Sqrt Transformed Total Anesthesia Time",
+    subtitle = expression(paste("Response Units: min")),
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 5f. emmip
+```{r}
+emmip(emm_sqrt_tta, ~ treatment, CI = TRUE)
+```
+
+# 6. Adding Horse Period (THIS ONE SHOULD BE INCLUDED IN THE FINAL REPORT)
+
+## 6a. TTA with Horse Period
+```{r}
+
+m_tta_hp <- lmer(
+  sqrt(total_anesthesia_time_min) ~ treatment +
+    (1 | horse) +
+    (1 | horse_period),
+  data   = df_summ4,
+  REML   = TRUE
+)
+
+```
+
+## 6b. Global F Test.
+
+```{r}
+#########
+# WE CHOSE TO WORK WITH THE SQRT TRANSFORMATION
+########
+# 1. Capture the ANOVA table as a data.frame
+anova_tbl_sqrt_hp <- as.data.frame(anova(m_tta_hp))
+anova_tbl_sqrt_hp %>%
+  rownames_to_column("Term") %>%
+  select(
+    Term,
+    `Num DF`   = NumDF,
+    `Den DF`   = DenDF,
+    `F value`  = `F value`,
+    `Pr(>F)`   = `Pr(>F)`
+  ) %>%  
+  mutate(
+    `Pr(>F)` = if_else(
+      `Pr(>F)` < 1e-4,
+      formatC(`Pr(>F)`, format = "e", digits = 2),   # scientific for tiny p‐values
+      sprintf("%.4f", `Pr(>F)`)                     # 4 decimal places otherwise
+    )
+  ) %>%
+  kable(
+    caption = "Type III F‐test for sqrt(Total Anesthesia Time)",
+    digits  = c(NA, 0, 0, 3, 6)   # ← last entry = 6 decimals for Pr(>F)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+## 6d. Pairwise (Tukey) Comnparisons for Treatment
+
+```{r}
+#running emmeans
+emm_sqrt_tta_hp <- emmeans(m_tta_hp, pairwise ~ treatment, adjust = "tukey")
+
+emm_sqrt_tta_hp$contrasts %>%
+  as.data.frame() %>%
+  mutate(
+    p_value_fmt = if_else(
+      p.value < 1e-4,
+      formatC(p.value, format = "e", digits = 2),
+      sprintf("%.5f", p.value)
+    )
+  ) %>%
+  select(Contrast = contrast, 
+         Estimate = estimate,
+         SE, 
+         DF = df, 
+         "T-Ratio" = t.ratio, 
+         "P-Value" = p_value_fmt) %>%
+  kable(
+    digits = c(NA, 3, 2, 0, 2, 4),
+    format = "latex",
+    caption = "Tukey Pairwise Contrasts for Treatment (Sqrt Transformed Total Anesthesia Time (Units: $min$))",
+    longtable = FALSE
+  ) %>%
+  kable_styling(full_width = TRUE,
+                latex_options = c("hold_position", "scale_down"))
+```
+
+## 6e. Diagnostic Plots
+
+```{r}
+#residual v fitted plot
+resid_sqrt_tta_hp <- tibble(
+  fitted = fitted(m_tta_hp),
+  resid  = resid(m_tta_hp)
+)
+
+ggplot(resid_sqrt_tta_hp, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs. Fitted for Response = Sqrt Transformed Total Anesthesia Time",
+    subtitle = expression(paste("Response Units: min"))
+  ) +
+  theme_minimal(base_size = 12)
+
+#QQ plot
+ggplot(data = tibble(resid = resid(m_tta_sqrt)), aes(sample = resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(
+    title = "QQ-plot of Residuals for Response = Sqrt Transformed Total Anesthesia Time",
+    subtitle = expression(paste("Response Units: min")),
+    x     = "Theoretical Quantiles",
+    y     = "Sample Quantiles"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 6f. emmip
+```{r}
+emmip(emm_sqrt_tta_hp, ~ treatment, CI = TRUE)
+```
+
+## 6g. Is Adding horse_period significant?
+```{r}
+m_base_ml <- lmer(
+  log1p(total_anesthesia_time_min) ~ treatment + (1 | horse),
+  data = df_summ4,
+  REML = FALSE
+)
+
+# 1. Get the comparison table
+lrt_tbl <- as.data.frame(anova(m_base_ml, m_tta_hp))
+
+# 2. Bring the rownames in as a column named "Model"
+lrt_tbl <- lrt_tbl %>%
+  rownames_to_column(var = "Model")
+
+# 3. Select & rename the relevant columns
+lrt_tbl %>%
+  select(
+    Model,
+    AIC,
+    BIC,
+    LogLik    = logLik,
+    Chisq,
+    Df,
+    `p-value` = `Pr(>Chisq)`
+  ) %>%
+  kable(
+    caption = "Likelihood‐Ratio Test for Adding horse\\_period Random Effect",
+    digits  = c(NA, 1, 1, 2, 2, 0, 3)
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+
+
+
+## 7a. Fitting the New Model, with Both HemScore and Horse Period
+```{r}
+m_tta_hp_hs <- lmer(
+  log1p(total_anesthesia_time_min) ~ treatment + hem_score +
+    (1 | horse) + (1 | horse_period),
+  data = df_summ4,
+  REML = TRUE
+)
+```
+
+```{r}
+#testing whether hemscore helps
+print(VarCorr(m_tta_hp_hs), comp = c("Variance","Std.Dev"))
+
+anova(m_tta_hp_hs, type="III")
+
+```
